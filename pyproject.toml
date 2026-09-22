@@ -1,0 +1,16 @@
+[project]
+name = "datasync-monitoring"
+version = "0.1.0"
+description = "Streamlit + DuckDB monitoring dashboard for AWS DataSync blob-to-S3 migrations"
+requires-python = ">=3.11"
+dependencies = [
+    "streamlit>=1.36.0",
+    "duckdb>=1.0.0",
+    "boto3>=1.34.0",
+    "aiobotocore>=2.13.0",
+    "plotly>=5.22.0",
+    "pandas>=2.2.0",
+]
+
+[dependency-groups]
+dev = []
