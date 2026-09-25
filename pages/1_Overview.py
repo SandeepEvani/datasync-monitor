@@ -8,8 +8,9 @@ from db import (
     get_connection, global_stats, task_summary,
     tasks_with_multiple_executions, top_failing_tasks,
     error_code_distribution, task_mode_distribution,
+    summary_global_stats, executions_without_details,
 )
-from utils import truncate_task_names
+from utils import truncate_task_names, format_bytes
 
 st.set_page_config(page_title="Overview | DataSync Monitor", page_icon="📊", layout="wide")
 
@@ -221,5 +222,49 @@ r1.metric("Transfer Success Rate", f"{transfer_rate:.1f}%")
 r2.metric("Verification Success Rate", f"{verification_rate:.1f}%")
 r3.metric("Overall Failure Rate", f"{failure_rate:.1f}%")
 r4.metric("Total Records", f"{stats['total_file_records']:,}")
+
+# ── summary report insights ─────────────────────────────────────────────────
+sum_stats = summary_global_stats(conn)
+if sum_stats.get("total_summaries", 0) > 0:
+    st.divider()
+    st.markdown("##### Summary Report Stats")
+    st.caption(
+        "Aggregate data from AWS DataSync summary reports — "
+        "includes executions that may not have detailed file-level reports."
+    )
+
+    ss1, ss2, ss3, ss4, ss5 = st.columns(5)
+    ss1.metric("Summary Reports", f"{sum_stats['total_summaries']:,}")
+    ss2.metric("Tasks (with summary)", f"{sum_stats['tasks_with_summary']:,}")
+    ss3.metric("Failed Executions", f"{sum_stats['failed_executions']:,}",
+               delta=None if sum_stats["failed_executions"] == 0
+               else f"{sum_stats['failed_executions']:,}",
+               delta_color="inverse")
+    ss4.metric("Total Bytes Written", format_bytes(sum_stats.get("sum_bytes_written")))
+    ss5.metric("Total Bytes Transferred", format_bytes(sum_stats.get("sum_bytes_transferred")))
+
+    df_no_details = executions_without_details(conn)
+    if not df_no_details.empty:
+        st.markdown("##### Executions with Summary Only (No Detailed Reports)")
+        st.caption("These executions have a summary report but no file-level detail — commonly failed or cancelled tasks.")
+        display_cols = [
+            "task_name", "execution_id", "overall_status",
+            "files_transferred", "files_verified", "files_skipped",
+            "bytes_written", "bytes_transferred",
+            "error_code", "error_detail",
+            "start_time", "end_time", "total_time",
+        ]
+        cols_present = [c for c in display_cols if c in df_no_details.columns]
+
+        def _highlight_status(row):
+            if row.get("overall_status") in ("ERROR", "FAILED"):
+                return ["background-color: rgba(248,113,113,0.15)"] * len(row)
+            return [""] * len(row)
+
+        st.dataframe(
+            df_no_details[cols_present].style.apply(_highlight_status, axis=1),
+            use_container_width=True,
+            height=min(len(df_no_details) * 36 + 40, 500),
+        )
 
 conn.close()

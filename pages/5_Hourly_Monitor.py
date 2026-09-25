@@ -10,7 +10,7 @@ from db import (
     get_connection, global_stats,
     hourly_transfer_volume, hourly_verification,
     hourly_execution_count, hourly_failure_breakdown,
-    time_range_stats,
+    time_range_stats, summary_global_stats,
 )
 from cloudwatch_client import get_ec2_metrics, get_datasync_agent_metrics, compute_period
 from utils import format_bytes, best_byte_unit
@@ -116,21 +116,25 @@ st.caption(f"Showing: **{range_label}**")
 # ── KPIs for the selected time range ────────────────────────────────────────
 rs = time_range_stats(conn, start_str, end_str)
 
-k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
-k1.metric("Active Tasks", f"{rs['tasks']:,}")
-k2.metric("Executions", f"{rs['executions']:,}")
-k3.metric("Files Transferred", f"{rs['files_transferred']:,}")
-k4.metric("Transfer Failures", f"{rs['transfer_failed']:,}",
-          delta=None if rs["transfer_failed"] == 0 else f"{rs['transfer_failed']:,}",
-          delta_color="inverse")
-k5.metric("Files Verified", f"{rs['files_verified']:,}")
-k6.metric("Verification Failures", f"{rs['verify_failed']:,}",
-          delta=None if rs["verify_failed"] == 0 else f"{rs['verify_failed']:,}",
-          delta_color="inverse")
-k7.metric("Data Transferred", _format_bytes(rs["bytes_transferred"]))
+def _v(val):
+    return val if val is not None else 0
 
-if rs["files_transferred"] and rs["files_transferred"] > 0:
-    transfer_rate = rs["transfer_ok"] / rs["files_transferred"] * 100
+k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
+k1.metric("Active Tasks", f"{_v(rs['tasks']):,}")
+k2.metric("Executions", f"{_v(rs['executions']):,}")
+k3.metric("Files Transferred", f"{_v(rs['files_transferred']):,}")
+k4.metric("Transfer Failures", f"{_v(rs['transfer_failed']):,}",
+          delta=None if not rs.get("transfer_failed") else f"{rs['transfer_failed']:,}",
+          delta_color="inverse")
+k5.metric("Files Verified", f"{_v(rs['files_verified']):,}")
+k6.metric("Verification Failures", f"{_v(rs['verify_failed']):,}",
+          delta=None if not rs.get("verify_failed") else f"{rs['verify_failed']:,}",
+          delta_color="inverse")
+k7.metric("Data Transferred", _format_bytes(rs.get("bytes_transferred")))
+
+if rs.get("files_transferred") and rs["files_transferred"] > 0:
+    transfer_ok = _v(rs.get("transfer_ok"))
+    transfer_rate = transfer_ok / rs["files_transferred"] * 100
     st.progress(min(transfer_rate / 100, 1.0), text=f"Transfer Success Rate: {transfer_rate:.1f}%")
 
 st.divider()

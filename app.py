@@ -12,9 +12,11 @@ import streamlit as st
 import config
 from db import (
     get_connection, global_stats, ingestion_stats, purge_all,
-    ingest_batch, get_ingested_keys, get_watermark, set_watermark,
+    ingest_chunk_bulk, get_ingested_keys, get_watermark, set_watermark,
+    summary_global_stats,
 )
-from s3_client import list_report_keys, download_and_parse_async
+from s3_client import list_report_keys, download_and_ingest_streaming
+from utils import format_bytes
 
 st.set_page_config(
     page_title="DataSync Monitor",
@@ -88,31 +90,41 @@ with st.sidebar:
             if not new_keys:
                 st.success("Already up to date — no new reports.")
             else:
-                st.caption(f"Found {len(new_keys)} new report files to ingest.")
+                chunk_size = 500
+                n_chunks = (len(new_keys) + chunk_size - 1) // chunk_size
+                st.caption(
+                    f"Found {len(new_keys)} new report files — "
+                    f"ingesting in {n_chunks} chunk(s) of {chunk_size}."
+                )
 
-                progress = st.progress(0, text=f"Downloading {len(new_keys)} files (async, 32 concurrent)...")
-                total_rows = 0
+                progress = st.progress(0, text=f"Downloading & ingesting {len(new_keys)} files...")
 
                 def _update_progress(done, total):
                     progress.progress(
                         done / total,
-                        text=f"Downloaded {done}/{total} files...",
+                        text=f"Downloaded & ingested {done:,}/{total:,} files...",
                     )
 
-                results = download_and_parse_async(
-                    config.S3_BUCKET, new_keys, progress_callback=_update_progress,
-                )
+                def _ingest_chunk(results):
+                    return ingest_chunk_bulk(conn, results)
 
-                progress.progress(1.0, text="Inserting records into DuckDB...")
-                for rk, records in results:
-                    total_rows += ingest_batch(conn, rk, records)
+                total_rows, summary_count = download_and_ingest_streaming(
+                    config.S3_BUCKET,
+                    new_keys,
+                    chunk_size=chunk_size,
+                    progress_callback=_update_progress,
+                    ingest_callback=_ingest_chunk,
+                )
 
                 if new_keys:
                     max_ts = max(rk.last_modified for rk in new_keys)
                     set_watermark(conn, max_ts)
 
                 progress.empty()
-                st.success(f"Ingested {len(new_keys)} report files ({total_rows:,} records).")
+                st.success(
+                    f"Ingested {len(new_keys)} report files "
+                    f"({total_rows:,} detail records, {summary_count} summary reports)."
+                )
 
             conn.close()
 
@@ -158,11 +170,14 @@ if stats["total_tasks"] == 0:
 
         #### Expected S3 Report Structure (JSON)
         ```
-        s3://<bucket>/<prefix>/<task_name>/Detailed-Reports/<task-id>/<exec-id>/
-            ├── *.json   (Transferred records)
-            ├── *.json   (Verified records)
-            ├── *.json   (Skipped records)
-            └── *.json   (Deleted records)
+        s3://<bucket>/<prefix>/<task_name>/
+            ├── Detailed-Reports/<task-id>/<exec-id>/
+            │   ├── *.json   (Transferred records)
+            │   ├── *.json   (Verified records)
+            │   ├── *.json   (Skipped records)
+            │   └── *.json   (Deleted records)
+            └── Summary-Reports/<task-id>/<exec-id>/
+                └── *.json   (Execution summary)
         ```
 
         Both **Enhanced mode** and **Basic mode** report schemas are auto-detected.
@@ -213,6 +228,20 @@ else:
     h2.metric("Verification Success Rate", f"{ver_rate:.1f}%")
     h3.metric("Transfer Failures", f"{stats['transfer_failed']:,}")
     h4.metric("Data Transferred", bytes_str)
+
+    sum_stats = summary_global_stats(conn)
+    if sum_stats.get("total_summaries", 0) > 0:
+        st.markdown("---")
+        st.caption("**From Summary Reports**")
+        s1, s2, s3, s4, s5 = st.columns(5)
+        s1.metric("Summary Reports", f"{sum_stats['total_summaries']:,}")
+        s2.metric("Files Transferred (summary)", f"{sum_stats['sum_files_transferred']:,}")
+        s3.metric("Bytes Written (summary)", format_bytes(sum_stats.get("sum_bytes_written")))
+        s4.metric("Bytes Transferred (summary)", format_bytes(sum_stats.get("sum_bytes_transferred")))
+        s5.metric("Failed Executions", f"{sum_stats['failed_executions']:,}",
+                  delta=None if sum_stats["failed_executions"] == 0
+                  else f"{sum_stats['failed_executions']:,}",
+                  delta_color="inverse")
 
     st.markdown("---")
     st.markdown(
