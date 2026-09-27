@@ -1,13 +1,13 @@
-"""Task Detail — per-task drill-down with execution history and file breakdown."""
+"""Task Detail — per-task drill-down with API status, execution history, and file records."""
 
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 
 from db import (
-    get_connection, task_summary, execution_summary,
+    get_connection, unified_task_table, execution_summary,
     file_detail, file_detail_count, error_code_distribution,
-    execution_summaries, task_summary_combined,
+    execution_summaries, api_tasks_list, api_executions_for_task,
 )
 from utils import format_bytes
 
@@ -20,16 +20,15 @@ C_SKIPPED     = "#FBBF24"
 C_DELETED     = "#A78BFA"
 
 conn = get_connection()
-df_tasks = task_summary(conn)
-df_tasks_combined = task_summary_combined(conn)
+df_unified = unified_task_table(conn)
 
-if df_tasks.empty and df_tasks_combined.empty:
+if df_unified.empty:
     st.info("No data available. Ingest reports first.")
     st.stop()
 
 st.markdown("## Task Detail")
 
-task_list = df_tasks_combined["task_name"].tolist() if not df_tasks_combined.empty else df_tasks["task_name"].tolist()
+task_list = df_unified["task_name"].tolist()
 search_term = st.text_input("Search tasks", placeholder="Type to filter...")
 if search_term:
     task_list = [t for t in task_list if search_term.lower() in t.lower()]
@@ -40,44 +39,64 @@ if not task_list:
 
 selected_task = st.selectbox("Select a task", task_list, index=0)
 
-# ── task-level KPIs ──────────────────────────────────────────────────────────
-has_detail = not df_tasks.empty and selected_task in df_tasks["task_name"].values
+# ── unified task-level KPIs ────────────────────────────────────────────────
+task_row = df_unified[df_unified["task_name"] == selected_task].iloc[0]
+st.divider()
 
-if has_detail:
-    task_row = df_tasks[df_tasks["task_name"] == selected_task].iloc[0]
-    st.divider()
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("Executions", int(task_row["executions"]))
-    c2.metric("Files Transferred", f"{int(task_row['transferred']):,}")
-    c3.metric("Files Verified", f"{int(task_row['verified']):,}")
-    c4.metric("Total Failures", f"{int(task_row['total_failed']):,}",
-              delta=None if task_row["total_failed"] == 0 else f"{int(task_row['total_failed']):,}",
-              delta_color="inverse")
-    c5.metric("Files Skipped", f"{int(task_row['skipped']):,}")
-    c6.metric("Files Deleted", f"{int(task_row['deleted']):,}")
+c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+c1.metric("Executions", int(task_row["executions"]))
+c2.metric("Files Transferred", f"{int(task_row['files_transferred']):,}")
+c3.metric("Files Verified", f"{int(task_row['files_verified']):,}")
+c4.metric("Total Failures", f"{int(task_row['total_failed']):,}",
+          delta=None if task_row["total_failed"] == 0 else f"{int(task_row['total_failed']):,}",
+          delta_color="inverse")
+c5.metric("Files Skipped", f"{int(task_row['files_skipped']):,}")
+c6.metric("Files Deleted", f"{int(task_row['files_deleted']):,}")
+c7.metric("Data Moved", format_bytes(task_row["bytes_moved"]))
 
-    ver_rate = (
-        task_row["verified"] / task_row["transferred"] * 100
-        if task_row["transferred"] > 0 else 0
-    )
+task_mode_label = str(task_row.get('task_mode', 'unknown')).capitalize()
+st.caption(f"Data source: **{task_row['data_source']}** | Mode: **{task_mode_label}**")
+
+if task_row["files_transferred"] > 0:
+    ver_rate = task_row["files_verified"] / task_row["files_transferred"] * 100
     st.progress(min(ver_rate / 100, 1.0), text=f"Verification Coverage: {ver_rate:.1f}%")
-else:
-    df_sum = execution_summaries(conn, task_name=selected_task)
-    st.divider()
-    st.info("This task has summary reports only — no file-level detailed reports were generated.")
-    if not df_sum.empty:
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Executions", len(df_sum))
-        c2.metric("Files Transferred (summary)", f"{int(df_sum['files_transferred'].sum()):,}")
-        c3.metric("Files Verified (summary)", f"{int(df_sum['files_verified'].sum()):,}")
-        c4.metric("Bytes Written", format_bytes(df_sum["bytes_written"].sum()))
-        c5.metric("Bytes Transferred", format_bytes(df_sum["bytes_transferred"].sum()))
 
 st.divider()
 
-# ── execution breakdown ─────────────────────────────────────────────────────
-st.markdown("##### Execution History")
-df_exec = execution_summary(conn, selected_task) if has_detail else pd.DataFrame()
+# ── API execution status ───────────────────────────────────────────────────
+df_api_tasks = api_tasks_list(conn)
+api_task_match = df_api_tasks[df_api_tasks["task_name"] == selected_task] if not df_api_tasks.empty else pd.DataFrame()
+
+if not api_task_match.empty:
+    api_row = api_task_match.iloc[0]
+    st.markdown("##### API Status")
+    a1, a2, a3, a4 = st.columns(4)
+    a1.metric("Task Status", api_row.get("task_status", "N/A"))
+    a2.metric("Active Executions", f"{int(api_row.get('active_executions', 0)):,}")
+    a3.metric("Succeeded", f"{int(api_row.get('succeeded_executions', 0)):,}")
+    a4.metric("Failed", f"{int(api_row.get('failed_executions', 0)):,}",
+              delta=None if api_row.get("failed_executions", 0) == 0
+              else f"{int(api_row['failed_executions']):,}",
+              delta_color="inverse")
+
+    task_id = api_row.get("task_id", "")
+    if task_id:
+        df_api_execs = api_executions_for_task(conn, task_id)
+        if not df_api_execs.empty:
+            with st.expander(f"API Executions ({len(df_api_execs)} total)", expanded=False):
+                display_cols = [c for c in [
+                    "execution_id", "status", "start_time", "end_time",
+                    "files_transferred", "bytes_written", "bytes_transferred",
+                    "error_code", "error_detail",
+                ] if c in df_api_execs.columns]
+                st.dataframe(df_api_execs[display_cols], use_container_width=True,
+                             height=min(len(df_api_execs) * 36 + 40, 400))
+
+    st.divider()
+
+# ── execution breakdown (from detailed reports) ───────────────────────────
+st.markdown("##### Execution History (Detailed Reports)")
+df_exec = execution_summary(conn, selected_task)
 
 if not df_exec.empty and len(df_exec) > 1:
     fig_exec = go.Figure()
@@ -109,13 +128,14 @@ if not df_exec.empty:
                     "transfer_failed", "skipped", "deleted", "total_records",
                     "first_event", "last_event"]
     st.dataframe(df_exec[[c for c in display_cols if c in df_exec.columns]], use_container_width=True)
+elif task_row["data_source"] == "summary":
+    st.caption("No detailed file-level reports for this task — showing summary data only.")
 
-# ── summary report details per execution ─────────────────────────────────────
+# ── summary report details per execution ───────────────────────────────────
 df_summaries = execution_summaries(conn, task_name=selected_task)
 if not df_summaries.empty:
     st.divider()
     st.markdown("##### Execution Summary Reports")
-    st.caption("Data from AWS DataSync summary reports — includes executions without detailed file-level reports.")
 
     for _, srow in df_summaries.iterrows():
         exec_id = srow["execution_id"]
@@ -128,37 +148,20 @@ if not df_summaries.empty:
             sc1, sc2, sc3, sc4 = st.columns(4)
             sc1.metric("Files Transferred", f"{int(srow.get('files_transferred') or 0):,}")
             sc2.metric("Files Verified", f"{int(srow.get('files_verified') or 0):,}")
-            sc3.metric("Files Skipped", f"{int(srow.get('files_skipped') or 0):,}")
-            sc4.metric("Files Deleted", f"{int(srow.get('files_deleted') or 0):,}")
+            sc3.metric("Bytes Written", format_bytes(srow.get("bytes_written")))
+            sc4.metric("Bytes Transferred", format_bytes(srow.get("bytes_transferred")))
 
-            sb1, sb2, sb3, sb4 = st.columns(4)
-            sb1.metric("Bytes Written", format_bytes(srow.get("bytes_written")))
-            sb2.metric("Bytes Transferred", format_bytes(srow.get("bytes_transferred")))
-            sb3.metric("Transfer Status", srow.get("transfer_status") or "N/A")
-            sb4.metric("Verify Status", srow.get("verify_status") or "N/A")
-
-            st1, st2, st3, st4 = st.columns(4)
+            st1, st2, st3 = st.columns(3)
             st1.metric("Start Time", srow.get("start_time") or "N/A")
             st2.metric("End Time", srow.get("end_time") or "N/A")
             st3.metric("Total Time", srow.get("total_time") or "N/A")
-            st4.metric("Task Mode", srow.get("task_mode") or "N/A")
 
-            if srow.get("source_location_type") or srow.get("destination_location_type"):
-                sl1, sl2 = st.columns(2)
-                sl1.caption(f"**Source:** {srow.get('source_location_type', 'N/A')}")
-                sl2.caption(f"**Destination:** {srow.get('destination_location_type', 'N/A')}")
-
-            ff_prepare = int(srow.get("files_failed_prepare") or 0)
             ff_transfer = int(srow.get("files_failed_transfer") or 0)
             ff_verify = int(srow.get("files_failed_verify") or 0)
-            ff_delete = int(srow.get("files_failed_delete") or 0)
-            if ff_prepare + ff_transfer + ff_verify + ff_delete > 0:
-                st.markdown("**Failed Files Breakdown**")
-                ff1, ff2, ff3, ff4 = st.columns(4)
-                ff1.metric("Prepare Failures", f"{ff_prepare:,}")
-                ff2.metric("Transfer Failures", f"{ff_transfer:,}")
-                ff3.metric("Verify Failures", f"{ff_verify:,}")
-                ff4.metric("Delete Failures", f"{ff_delete:,}")
+            if ff_transfer + ff_verify > 0:
+                ff1, ff2 = st.columns(2)
+                ff1.metric("Transfer Failures", f"{ff_transfer:,}")
+                ff2.metric("Verify Failures", f"{ff_verify:,}")
 
             if srow.get("error_code") or srow.get("error_detail"):
                 st.error(
@@ -166,8 +169,8 @@ if not df_summaries.empty:
                     f"**Detail:** {srow.get('error_detail', 'N/A')}"
                 )
 
-# ── per-task error codes ─────────────────────────────────────────────────────
-df_task_errors = error_code_distribution(conn, selected_task) if has_detail else pd.DataFrame()
+# ── per-task error codes ───────────────────────────────────────────────────
+df_task_errors = error_code_distribution(conn, selected_task)
 if not df_task_errors.empty:
     st.divider()
     st.markdown("##### Error Code Breakdown")
@@ -187,13 +190,14 @@ if not df_task_errors.empty:
 
 st.divider()
 
-# ── file-level records ───────────────────────────────────────────────────────
+# ── file-level records ─────────────────────────────────────────────────────
+has_detail = not df_exec.empty
 if has_detail:
     st.markdown("##### File Records")
 
     col_exec_filter, col_type_filter, col_status_filter, col_search = st.columns([1, 1, 1, 2])
     with col_exec_filter:
-        exec_options = ["All"] + (df_exec["execution_id"].tolist() if not df_exec.empty else [])
+        exec_options = ["All"] + df_exec["execution_id"].tolist()
         sel_exec = st.selectbox("Execution", exec_options, key="task_exec_filter")
     with col_type_filter:
         type_options = ["All", "transferred", "verified", "skipped", "deleted"]

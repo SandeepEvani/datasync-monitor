@@ -1,8 +1,9 @@
 """
-DataSync Monitoring Dashboard
-=============================
+DataSync Monitoring Dashboard — V2
+===================================
 Streamlit + DuckDB monitoring solution for AWS DataSync blob-to-S3 migrations.
-Supports both Enhanced and Basic mode JSON task reports automatically.
+Polls the DataSync management plane and ingests S3 JSON task reports.
+Single source of truth: detailed reports preferred, summary as fallback.
 
 Launch:  uv run streamlit run app.py
 """
@@ -11,11 +12,13 @@ import streamlit as st
 
 import config
 from db import (
-    get_connection, global_stats, ingestion_stats, purge_all,
+    get_connection, ingestion_stats, purge_all,
     ingest_chunk_bulk, get_ingested_keys, get_watermark, set_watermark,
-    summary_global_stats,
+    unified_kpis, api_task_stats, api_execution_stats,
+    upsert_api_tasks, upsert_api_executions,
 )
 from s3_client import list_report_keys, download_and_ingest_streaming
+from datasync_api import poll_all_executions
 from utils import format_bytes
 
 st.set_page_config(
@@ -72,7 +75,19 @@ with st.sidebar:
 
     st.markdown("**Data Controls**")
 
-    if st.button("🔄 Refresh Data (Incremental)", use_container_width=True, type="primary"):
+    if st.button("📡 Poll DataSync API", use_container_width=True):
+        conn = get_connection()
+        with st.spinner("Polling DataSync tasks and executions..."):
+            try:
+                tasks, execs = poll_all_executions()
+                upsert_api_tasks(conn, tasks)
+                upsert_api_executions(conn, execs)
+                st.success(f"Polled {len(tasks)} tasks, {len(execs)} executions.")
+            except Exception as e:
+                st.error(f"API poll failed: {e}")
+        conn.close()
+
+    if st.button("🔄 Refresh Reports (Incremental)", use_container_width=True, type="primary"):
         if not config.S3_BUCKET:
             st.error("Set the S3 bucket name first.")
         else:
@@ -155,9 +170,13 @@ st.markdown(
 )
 
 conn = get_connection()
-stats = global_stats(conn)
+kpis = unified_kpis(conn)
+api_tasks = api_task_stats(conn)
+api_execs = api_execution_stats(conn)
 
-if stats["total_tasks"] == 0:
+has_data = kpis["total_tasks"] > 0 or api_tasks["total_tasks"] > 0
+
+if not has_data:
     st.markdown("---")
     st.markdown(
         """
@@ -165,8 +184,9 @@ if stats["total_tasks"] == 0:
 
         1. **Configure** your S3 bucket and report prefix in the sidebar
         2. **Ensure** your AWS credentials are available (environment variables, profile, or IAM role)
-        3. Click **Refresh Data** to discover and ingest DataSync JSON reports
-        4. Navigate to **Overview**, **Task Detail**, or **File Explorer** pages
+        3. Click **Poll DataSync API** to discover tasks and execution status
+        4. Click **Refresh Reports** to ingest detailed + summary JSON reports from S3
+        5. Navigate to **Overview**, **Task Detail**, or **File Explorer** pages
 
         #### Expected S3 Report Structure (JSON)
         ```
@@ -188,60 +208,78 @@ if stats["total_tasks"] == 0:
         export DATASYNC_REPORTS_PREFIX="datasync-reports/"
         export AWS_REGION="us-east-1"
         export AWS_PROFILE="your-profile"       # optional
-        export DATASYNC_DB_PATH="datasync.duckdb"  # optional
         ```
         """
     )
 else:
+    # ── Management Plane (from DataSync API) ────────────────────────────────
+    if api_tasks["total_tasks"] > 0:
+        st.markdown("---")
+        st.markdown("#### Management Plane")
+        st.caption("Live task & execution state from the DataSync API")
+
+        a1, a2, a3, a4 = st.columns(4)
+        a1.metric("Total Tasks (API)", f"{api_tasks['total_tasks']:,}")
+        a2.metric("Available", f"{api_tasks['available']:,}")
+        a3.metric("Running", f"{api_tasks['running']:,}")
+        a4.metric("Unavailable", f"{api_tasks['unavailable']:,}",
+                  delta=None if api_tasks["unavailable"] == 0
+                  else f"{api_tasks['unavailable']:,}",
+                  delta_color="inverse")
+
+        e1, e2, e3, e4, e5, e6 = st.columns(6)
+        e1.metric("Total Executions", f"{api_execs['total_executions']:,}")
+        e2.metric("Queued", f"{api_execs['queued']:,}")
+        e3.metric("Preparing", f"{api_execs['preparing']:,}")
+        e4.metric("Transferring", f"{api_execs['transferring']:,}")
+        e5.metric("Succeeded", f"{api_execs['succeeded']:,}")
+        e6.metric("Failed", f"{api_execs['failed']:,}",
+                  delta=None if api_execs["failed"] == 0
+                  else f"{api_execs['failed']:,}",
+                  delta_color="inverse")
+
+        if api_execs["active"] > 0:
+            st.info(f"**{api_execs['active']}** execution(s) currently active")
+
+        if api_tasks.get("last_polled"):
+            st.caption(f"Last polled: {api_tasks['last_polled']}")
+
+    # ── Unified KPIs (single source of truth) ──────────────────────────────
     st.markdown("---")
+    st.markdown("#### Data Layer (Report Analysis)")
+    st.caption(
+        f"Source: {kpis['detail_executions']} executions from detailed reports, "
+        f"{kpis['summary_only_executions']} from summary-only"
+    )
 
     k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("Tasks", f"{stats['total_tasks']:,}")
-    k2.metric("Executions", f"{stats['total_executions']:,}")
-    k3.metric("Files Transferred", f"{stats['transferred']:,}")
-    k4.metric("Files Verified", f"{stats['verified']:,}")
-    k5.metric("Total Failures", f"{stats['total_failed']:,}",
-              delta=None if stats["total_failed"] == 0 else f"{stats['total_failed']:,}",
+    k1.metric("Tasks", f"{kpis['total_tasks']:,}")
+    k2.metric("Executions", f"{kpis['total_executions']:,}")
+    k3.metric("Files Transferred", f"{kpis['files_transferred']:,}")
+    k4.metric("Files Verified", f"{kpis['files_verified']:,}")
+    k5.metric("Total Failures", f"{kpis['total_failed']:,}",
+              delta=None if kpis["total_failed"] == 0 else f"{kpis['total_failed']:,}",
               delta_color="inverse")
 
     transfer_health = (
-        stats["transfer_success"] / stats["transferred"] * 100
-        if stats["transferred"] > 0 else 100
+        kpis["transfer_ok"] / kpis["files_transferred"] * 100
+        if kpis["files_transferred"] > 0 else 100
     )
     ver_rate = (
-        stats["verify_success"] / stats["verified"] * 100
-        if stats["verified"] > 0 else 0
+        kpis["verify_ok"] / kpis["files_verified"] * 100
+        if kpis["files_verified"] > 0 else 0
     )
-    total_bytes = stats["total_bytes"] or 0
-    if total_bytes > 1_000_000_000_000:
-        bytes_str = f"{total_bytes / 1_000_000_000_000:.2f} TB"
-    elif total_bytes > 1_000_000_000:
-        bytes_str = f"{total_bytes / 1_000_000_000:.2f} GB"
-    elif total_bytes > 1_000_000:
-        bytes_str = f"{total_bytes / 1_000_000:.1f} MB"
-    else:
-        bytes_str = f"{total_bytes:,.0f} B"
 
     st.markdown("---")
     h1, h2, h3, h4 = st.columns(4)
     h1.metric("Transfer Success Rate", f"{transfer_health:.1f}%")
     h2.metric("Verification Success Rate", f"{ver_rate:.1f}%")
-    h3.metric("Transfer Failures", f"{stats['transfer_failed']:,}")
-    h4.metric("Data Transferred", bytes_str)
+    h3.metric("Transfer Failures", f"{kpis['transfer_failed']:,}")
+    h4.metric("Net Data Moved", format_bytes(kpis["net_bytes_moved"]))
 
-    sum_stats = summary_global_stats(conn)
-    if sum_stats.get("total_summaries", 0) > 0:
-        st.markdown("---")
-        st.caption("**From Summary Reports**")
-        s1, s2, s3, s4, s5 = st.columns(5)
-        s1.metric("Summary Reports", f"{sum_stats['total_summaries']:,}")
-        s2.metric("Files Transferred (summary)", f"{sum_stats['sum_files_transferred']:,}")
-        s3.metric("Bytes Written (summary)", format_bytes(sum_stats.get("sum_bytes_written")))
-        s4.metric("Bytes Transferred (summary)", format_bytes(sum_stats.get("sum_bytes_transferred")))
-        s5.metric("Failed Executions", f"{sum_stats['failed_executions']:,}",
-                  delta=None if sum_stats["failed_executions"] == 0
-                  else f"{sum_stats['failed_executions']:,}",
-                  delta_color="inverse")
+    if transfer_health < 100 and kpis["files_transferred"] > 0:
+        st.progress(min(transfer_health / 100, 1.0),
+                    text=f"Transfer Success Rate: {transfer_health:.1f}%")
 
     st.markdown("---")
     st.markdown(
@@ -250,9 +288,11 @@ else:
 
         | Page | What it shows |
         |------|---------------|
-        | **Overview** | High-level KPIs, status distribution, top failures, multi-execution tasks |
-        | **Task Detail** | Per-task drill-down — execution history, file counts, per-file records |
+        | **Overview** | Unified KPIs, status distribution, top failures, management plane |
+        | **Task Detail** | Per-task drill-down — execution history, API status, file records |
         | **File Explorer** | Cross-task file search, failure analysis, error code breakdown |
+        | **Analytics** | Trends (day/hour), cumulative charts, file size analysis |
+        | **Hourly Monitor** | AWS-style time range filters, CloudWatch metrics |
         """
     )
 

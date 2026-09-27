@@ -9,7 +9,7 @@ DB_PATH = os.environ.get("DATASYNC_DB_PATH", "datasync_monitor.duckdb")
 
 REPORT_TYPE_KEYS = ["Transferred", "Skipped", "Verified", "Deleted"]
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
