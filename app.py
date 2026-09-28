@@ -9,6 +9,7 @@ Launch:  uv run streamlit run app.py
 """
 
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 
 import config
 from db import (
@@ -70,6 +71,22 @@ with st.sidebar:
     if region:
         config.AWS_REGION = region
     config.AWS_PROFILE = profile if profile else None
+
+    st.divider()
+
+    st.markdown("**Auto Refresh**")
+    auto_refresh = st.toggle("Enable auto refresh", value=False, key="auto_refresh")
+    refresh_interval = st.select_slider(
+        "Interval",
+        options=[30, 60, 120, 300, 600],
+        format_func=lambda x: f"{x}s" if x < 60 else f"{x // 60}m",
+        value=60,
+        key="refresh_interval",
+        disabled=not auto_refresh,
+    )
+    if auto_refresh:
+        st_autorefresh(interval=refresh_interval * 1000, key="datasync_autorefresh")
+        st.caption(f"Refreshing every {refresh_interval}s" if refresh_interval < 60 else f"Refreshing every {refresh_interval // 60}m")
 
     st.divider()
 

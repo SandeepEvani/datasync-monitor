@@ -5,6 +5,7 @@ description = "Streamlit + DuckDB monitoring dashboard for AWS DataSync blob-to-
 requires-python = ">=3.11"
 dependencies = [
     "streamlit>=1.36.0",
+    "streamlit-autorefresh>=1.0.1",
     "duckdb>=1.0.0",
     "boto3>=1.34.0",
     "aiobotocore>=2.13.0",
