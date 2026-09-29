@@ -9,6 +9,7 @@ from db import (
     error_code_distribution, task_mode_distribution,
     api_task_stats, api_execution_stats, api_tasks_list,
 )
+from reports import generate_all_tasks_report
 from utils import truncate_task_names, format_bytes
 
 st.set_page_config(page_title="Overview | DataSync Monitor", page_icon="📊", layout="wide")
@@ -25,6 +26,15 @@ C_ACTIVE      = "#34D399"
 st.markdown("## Overview")
 
 conn = get_connection()
+
+report_data, report_filename = generate_all_tasks_report(conn)
+st.download_button(
+    label="Download All Tasks Report",
+    data=report_data,
+    file_name=report_filename,
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)
+
 kpis = unified_kpis(conn)
 api_ts = api_task_stats(conn)
 api_es = api_execution_stats(conn)

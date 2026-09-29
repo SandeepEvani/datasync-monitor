@@ -9,6 +9,7 @@ from db import (
     file_detail, file_detail_count, error_code_distribution,
     execution_summaries, api_tasks_list, api_executions_for_task,
 )
+from reports import generate_task_report
 from utils import format_bytes
 
 st.set_page_config(page_title="Task Detail | DataSync Monitor", page_icon="🔍", layout="wide")
@@ -38,6 +39,14 @@ if not task_list:
     st.stop()
 
 selected_task = st.selectbox("Select a task", task_list, index=0)
+
+report_data, report_filename = generate_task_report(conn, selected_task)
+st.download_button(
+    label="Download Task Report",
+    data=report_data,
+    file_name=report_filename,
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)
 
 # ── unified task-level KPIs ────────────────────────────────────────────────
 task_row = df_unified[df_unified["task_name"] == selected_task].iloc[0]
