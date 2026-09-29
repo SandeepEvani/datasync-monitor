@@ -152,7 +152,7 @@ def _build_summary_df(conn, task_name: str | None = None) -> pd.DataFrame:
     if df.empty:
         return df
 
-    cols_to_drop = [c for c in ["bytes_transferred"] if c in df.columns]
+    cols_to_drop = [c for c in ["bytes_transferred", "bytes_compressed"] if c in df.columns]
     if cols_to_drop:
         df = df.drop(columns=cols_to_drop)
 
@@ -170,7 +170,6 @@ def _build_summary_df(conn, task_name: str | None = None) -> pd.DataFrame:
         "files_skipped": "Files Skipped",
         "files_deleted": "Files Deleted",
         "bytes_written": "Bytes Written",
-        "bytes_compressed": "Bytes Compressed",
         "prepare_duration": "Prepare Duration",
         "prepare_status": "Prepare Status",
         "transfer_duration": "Transfer Duration",
@@ -193,8 +192,6 @@ def _build_summary_df(conn, task_name: str | None = None) -> pd.DataFrame:
 
     if "Bytes Written" in df.columns:
         _add_byte_conversions(df, "Bytes Written", "Written")
-    if "Bytes Compressed" in df.columns:
-        _add_byte_conversions(df, "Bytes Compressed", "Compressed")
     if "Est. Bytes to Transfer" in df.columns:
         _add_byte_conversions(df, "Est. Bytes to Transfer", "Est. Transfer")
 
