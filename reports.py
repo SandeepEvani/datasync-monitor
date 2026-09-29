@@ -228,8 +228,17 @@ def _build_detail_df(conn, task_name: str) -> pd.DataFrame:
     return df
 
 
+def _sort_df(df: pd.DataFrame, sort_cols: list[tuple[str, bool]]) -> pd.DataFrame:
+    cols = [c for c, _ in sort_cols if c in df.columns]
+    asc = [a for c, a in sort_cols if c in df.columns]
+    if cols:
+        df = df.sort_values(cols, ascending=asc).reset_index(drop=True)
+    return df
+
+
 def generate_all_tasks_report(conn) -> tuple[bytes, str]:
     df = _build_summary_df(conn)
+    df = _sort_df(df, [("Task Name", True), ("Start Time", False)])
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         sheet_name = "All Tasks - Summary"
@@ -247,7 +256,11 @@ def generate_all_tasks_report(conn) -> tuple[bytes, str]:
 
 def generate_task_report(conn, task_name: str) -> tuple[bytes, str]:
     df_summary = _build_summary_df(conn, task_name=task_name)
+    df_summary = _sort_df(df_summary, [("Start Time", False)])
     df_detail = _build_detail_df(conn, task_name)
+    df_detail = _sort_df(df_detail, [
+        ("Execution ID", True), ("Report Type", True), ("Event Timestamp", False),
+    ])
 
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
